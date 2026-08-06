@@ -1,70 +1,25 @@
 pipeline {
     agent any
 
-    options {
-        timestamps()
-        disableConcurrentBuilds()
-        buildDiscarder(logRotator(numToKeepStr: '10'))
-    }
-
     parameters {
         string(name: 'AWS_REGION', defaultValue: 'ap-south-1', description: 'AWS region where ECR exists')
-        string(name: 'ECR_REPO', defaultValue: 'gitea', description: 'ECR repository name')
-    }
-
-    environment {
-        IMAGE_TAG = ''
-        IMAGE_NAME = ''
-        IMAGE_REFERENCE_TAGS = ''
+        string(name: 'ECR_REPO',   defaultValue: 'gitea',      description: 'ECR repository name')
     }
 
     stages {
 
         stage('Checkout Source') {
             steps {
-                echo 'Checking out source code from SCM...'
                 checkout scm
             }
         }
 
-        stage('Prepare Build Metadata') {
+        stage('Set Image Tag') {
             steps {
                 script {
-                    def buildNumber = env.BUILD_NUMBER?.toInteger() ?: 1
-                    def minor = Math.max(0, buildNumber - 1)
-                    env.IMAGE_TAG = "1.${minor}"
-                    env.IMAGE_REFERENCE_TAGS = "${env.IMAGE_TAG},latest"
-                    echo "Prepared build metadata: IMAGE_TAG=${env.IMAGE_TAG}, IMAGE_REFERENCE_TAGS=${env.IMAGE_REFERENCE_TAGS}"
+                    env.IMAGE_TAG = "${env.BUILD_NUMBER}"
+                    echo "IMAGE_TAG = ${env.IMAGE_TAG}"
                 }
-            }
-        }
-
-        stage('Validate Required Tools') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "Checking required tools..."
-
-                    git --version
-                    docker --version
-                    aws --version
-
-                    echo "Tool validation completed."
-                '''
-            }
-        }
-
-        stage('Validate AWS Identity') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "Validating AWS identity available to Jenkins user..."
-                    aws sts get-caller-identity
-
-                    echo "AWS identity validation completed."
-                '''
             }
         }
 
@@ -78,20 +33,9 @@ pipeline {
 
                         IMAGE_NAME="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
 
-                        echo "Building Docker image..."
-                        echo "Repository: ${ECR_REPO}"
-                        echo "Tag: ${IMAGE_TAG}"
-                        echo "Reference tags: ${IMAGE_REFERENCE_TAGS}"
+                        echo "Building image: ${ECR_REPO}:${IMAGE_TAG}"
 
                         docker build -t "${IMAGE_NAME}" .
-
-                        for refTag in $(echo "${IMAGE_REFERENCE_TAGS}" | tr ',' '\n'); do
-                            if [ "${refTag}" != "${IMAGE_TAG}" ]; then
-                                docker tag "${IMAGE_NAME}" "${ECR_REGISTRY}/${ECR_REPO}:${refTag}"
-                            fi
-                        done
-
-                        echo "Docker image build completed."
                     '''
                 }
             }
@@ -109,67 +53,13 @@ pipeline {
                         echo "Logging in to AWS ECR..."
 
                         aws ecr get-login-password --region "${AWS_REGION}" | \
-                        docker login \
-                          --username AWS \
-                          --password-stdin "${ECR_REGISTRY}"
+                        docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
-                        echo "AWS ECR login successful."
+                        echo "ECR login successful."
                     '''
                 }
             }
         }
 
-        stage('Push Docker Image to ECR') {
-            steps {
-                withCredentials([
-                    string(credentialsId: 'ecr-registry', variable: 'ECR_REGISTRY')
-                ]) {
-                    sh '''
-                        set -e
-
-                        IMAGE_NAME="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
-
-                        echo "Pushing Docker image to ECR..."
-                        docker push "${IMAGE_NAME}"
-
-                        for refTag in $(echo "${IMAGE_REFERENCE_TAGS}" | tr ',' '\n'); do
-                            if [ "${refTag}" != "${IMAGE_TAG}" ]; then
-                                docker push "${ECR_REGISTRY}/${ECR_REPO}:${refTag}"
-                            fi
-                        done
-
-                        echo "IMAGE_NAME=${IMAGE_NAME}" > image-info.txt
-                        echo "IMAGE_TAG=${IMAGE_TAG}" >> image-info.txt
-                        echo "IMAGE_REFERENCE_TAGS=${IMAGE_REFERENCE_TAGS}" >> image-info.txt
-                        echo "ECR_REPO=${ECR_REPO}" >> image-info.txt
-                        echo "AWS_REGION=${AWS_REGION}" >> image-info.txt
-
-                        echo "Image pushed successfully:"
-                        cat image-info.txt
-                    '''
-                }
-            }
-        }
-
-        stage('Archive Build Metadata') {
-            steps {
-                archiveArtifacts artifacts: 'image-info.txt', fingerprint: true
-            }
-        }
-    }
-
-    post {
-        success {
-            echo 'Pipeline completed successfully. Docker image was built and pushed to ECR.'
-        }
-
-        failure {
-            echo 'Pipeline failed. Check the failed stage logs.'
-        }
-
-        always {
-            echo 'Cleaning workspace...'
-            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
-        }
     }
 }

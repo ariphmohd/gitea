@@ -33,7 +33,7 @@ pipeline {
                     def major = 1
                     def minor = buildNumber - 1
                     env.IMAGE_TAG = "${major}.${minor}"
-                    env.IMAGE_REFERENCE_TAGS = "${IMAGE_TAG},latest"
+                    env.IMAGE_REFERENCE_TAGS = "${env.IMAGE_TAG},latest"
                 }
             }
         }

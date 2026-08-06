@@ -29,15 +29,7 @@ pipeline {
         stage('Prepare Build Metadata') {
             steps {
                 script {
-                    env.GIT_COMMIT_SHORT = sh(
-                        script: 'git rev-parse --short HEAD',
-                        returnStdout: true
-                    ).trim()
-
-                    env.IMAGE_TAG = "${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}"
-
-                    echo "Git commit short SHA: ${env.GIT_COMMIT_SHORT}"
-                    echo "Image tag: ${env.IMAGE_TAG}"
+                    env.IMAGE_TAG = "${BUILD_NUMBER}"
                 }
             }
         }

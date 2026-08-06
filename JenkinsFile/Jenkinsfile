@@ -15,6 +15,7 @@ pipeline {
     environment {
         IMAGE_TAG = ''
         IMAGE_NAME = ''
+        IMAGE_REFERENCE_TAGS = ''
     }
 
     stages {
@@ -29,11 +30,11 @@ pipeline {
         stage('Prepare Build Metadata') {
             steps {
                 script {
-                    def buildNumber = env.BUILD_NUMBER as int
-                    def major = 1
-                    def minor = buildNumber - 1
-                    env.IMAGE_TAG = "${major}.${minor}"
+                    def buildNumber = env.BUILD_NUMBER?.toInteger() ?: 1
+                    def minor = Math.max(0, buildNumber - 1)
+                    env.IMAGE_TAG = "1.${minor}"
                     env.IMAGE_REFERENCE_TAGS = "${env.IMAGE_TAG},latest"
+                    echo "Prepared build metadata: IMAGE_TAG=${env.IMAGE_TAG}, IMAGE_REFERENCE_TAGS=${env.IMAGE_REFERENCE_TAGS}"
                 }
             }
         }

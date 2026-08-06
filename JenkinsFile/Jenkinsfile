@@ -29,7 +29,11 @@ pipeline {
         stage('Prepare Build Metadata') {
             steps {
                 script {
-                    env.IMAGE_TAG = "${BUILD_NUMBER}"
+                    def buildNumber = env.BUILD_NUMBER as int
+                    def major = 1
+                    def minor = buildNumber - 1
+                    env.IMAGE_TAG = "${major}.${minor}"
+                    env.IMAGE_REFERENCE_TAGS = "${IMAGE_TAG},latest"
                 }
             }
         }
@@ -76,8 +80,15 @@ pipeline {
                         echo "Building Docker image..."
                         echo "Repository: ${ECR_REPO}"
                         echo "Tag: ${IMAGE_TAG}"
+                        echo "Reference tags: ${IMAGE_REFERENCE_TAGS}"
 
                         docker build -t "${IMAGE_NAME}" .
+
+                        for refTag in $(echo "${IMAGE_REFERENCE_TAGS}" | tr ',' '\n'); do
+                            if [ "${refTag}" != "${IMAGE_TAG}" ]; then
+                                docker tag "${IMAGE_NAME}" "${ECR_REGISTRY}/${ECR_REPO}:${refTag}"
+                            fi
+                        done
 
                         echo "Docker image build completed."
                     '''
@@ -120,8 +131,15 @@ pipeline {
                         echo "Pushing Docker image to ECR..."
                         docker push "${IMAGE_NAME}"
 
+                        for refTag in $(echo "${IMAGE_REFERENCE_TAGS}" | tr ',' '\n'); do
+                            if [ "${refTag}" != "${IMAGE_TAG}" ]; then
+                                docker push "${ECR_REGISTRY}/${ECR_REPO}:${refTag}"
+                            fi
+                        done
+
                         echo "IMAGE_NAME=${IMAGE_NAME}" > image-info.txt
                         echo "IMAGE_TAG=${IMAGE_TAG}" >> image-info.txt
+                        echo "IMAGE_REFERENCE_TAGS=${IMAGE_REFERENCE_TAGS}" >> image-info.txt
                         echo "ECR_REPO=${ECR_REPO}" >> image-info.txt
                         echo "AWS_REGION=${AWS_REGION}" >> image-info.txt
 

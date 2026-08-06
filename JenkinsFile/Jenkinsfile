@@ -61,5 +61,25 @@ pipeline {
             }
         }
 
+        stage('Push Docker Image to ECR') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'ecr-registry', variable: 'ECR_REGISTRY')
+                ]) {
+                    sh '''
+                        set -e
+
+                        IMAGE_NAME="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
+
+                        echo "Pushing image: ${ECR_REPO}:${IMAGE_TAG}"
+
+                        docker push "${IMAGE_NAME}"
+
+                        echo "Push completed successfully."
+                    '''
+                }
+            }
+        }
+
     }
 }

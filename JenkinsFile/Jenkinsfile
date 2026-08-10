@@ -41,6 +41,38 @@ pipeline {
             }
         }
 
+        stage('Trivy Security Scan') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'ecr-registry', variable: 'ECR_REGISTRY')
+                ]) {
+                    sh '''
+                        set -e
+
+                        IMAGE_NAME="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
+
+                        echo "=== Trivy scanning: ${ECR_REPO}:${IMAGE_TAG} ==="
+
+                        # ensure host cache dir exists (persists the vuln DB)
+                        mkdir -p "${HOME}/.cache/trivy"
+
+                        docker run --rm \
+                          -v /var/run/docker.sock:/var/run/docker.sock \
+                          -v "${HOME}/.cache/trivy:/root/.cache/" \
+                          aquasec/trivy:latest image \
+                            --severity HIGH,CRITICAL \
+                            --no-progress \
+                            --scanners vuln \
+                            --exit-code 0 \
+                            --timeout 10m \
+                            "${IMAGE_NAME}"
+
+                        echo "=== Trivy scan completed (report-only) ==="
+                    '''
+                }
+            }
+        }
+
         stage('Login to AWS ECR') {
             steps {
                 withCredentials([
@@ -76,53 +108,6 @@ pipeline {
                         docker push "${IMAGE_NAME}"
 
                         echo "Push completed successfully."
-                    '''
-                }
-            }
-        }
-
-        stage('Update Manifest Repo') {
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'github-manifest-creds',
-                        usernameVariable: 'GIT_USER',
-                        passwordVariable: 'GIT_TOKEN'
-                    )
-                ]) {
-                    sh '''
-                        set -e
-
-                        # 1. Clone the manifest repo fresh (shallow = fast)
-                        rm -rf manifest-repo
-                        git clone --depth 1 \
-                          https://${GIT_USER}:${GIT_TOKEN}@github.com/ariphmohd/gitea-k8s-manifests.git \
-                          manifest-repo
-
-                        cd manifest-repo
-
-                        # 2. Update the image tag in the deployment file
-                        #    Replaces whatever tag is there with the new BUILD_NUMBER
-                        sed -i "s#\\(126830716304.dkr.ecr.ap-south-1.amazonaws.com/gitea:\\).*#\\1${BUILD_NUMBER}#" \
-                          gitea/05-gitea-deployment.yaml
-
-                        # 3. Show what changed (for the build log)
-                        echo "New image line:"
-                        grep "gitea:" gitea/05-gitea-deployment.yaml
-
-                        # 4. Set commit identity
-                        git config user.email "jenkins@ci.local"
-                        git config user.name  "Jenkins CI"
-
-                        # 5. Commit only if something actually changed
-                        if git diff --quiet; then
-                          echo "No image change, skipping commit."
-                        else
-                          git add gitea/05-gitea-deployment.yaml
-                          git commit -m "ci: update gitea image to ${BUILD_NUMBER}"
-                          git push origin main
-                          echo "Manifest updated to gitea:${BUILD_NUMBER}"
-                        fi
                     '''
                 }
             }

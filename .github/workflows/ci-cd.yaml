@@ -14,7 +14,7 @@ on:
 # OIDC Permissions (Mandatory for Zero-Key AWS STS authentication)
 permissions:
   id-token: write
-  contents: write
+  contents: read
 
 env:
   AWS_REGION: "ap-south-1"
@@ -45,6 +45,19 @@ jobs:
           ignore-unfixed: true
           format: 'table'
           severity: 'CRITICAL,HIGH'
+
+      # ------------------------------------------------------------------------
+      # Debug
+      # ------------------------------------------------------------------------
+      - name: Debug Variables
+        run: |
+          echo "ROLE=${{ env.AWS_ROLE_ARN }}"
+          echo "REGION=${{ env.AWS_REGION }}"
+
+      - name: Debug GitHub Context
+        run: |
+          echo "Repository: ${{ github.repository }}"
+          echo "Ref: ${{ github.ref }}"
 
       # ------------------------------------------------------------------------
       # Step 3: Zero-Static-Key AWS Authentication via GitHub OIDC

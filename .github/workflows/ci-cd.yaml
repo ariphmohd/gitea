@@ -47,26 +47,13 @@ jobs:
           severity: 'CRITICAL,HIGH'
 
       # ------------------------------------------------------------------------
-      # Debug
-      # ------------------------------------------------------------------------
-      - name: Debug Variables
-        run: |
-          echo "ROLE=${{ env.AWS_ROLE_ARN }}"
-          echo "REGION=${{ env.AWS_REGION }}"
-
-      - name: Debug GitHub Context
-        run: |
-          echo "Repository: ${{ github.repository }}"
-          echo "Ref: ${{ github.ref }}"
-
-      # ------------------------------------------------------------------------
       # Step 3: Zero-Static-Key AWS Authentication via GitHub OIDC
       # ------------------------------------------------------------------------
       - name: 🔐 Authenticate to AWS via OIDC (No Static Keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{secrets.AWS_IAM_ROLE}}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ap-south-1
 
       # ------------------------------------------------------------------------
       # Step 4: Log in to Amazon ECR Private Registry

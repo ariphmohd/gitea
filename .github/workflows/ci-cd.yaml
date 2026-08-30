@@ -29,6 +29,7 @@ jobs:
       - name: 🔐 Authenticate to AWS via OIDC (No Static Keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          audience: sts.amazonaws.com
           role-to-assume: ${{secrets.AWS_IAM_ROLE}}
           aws-region: ap-south-1
   

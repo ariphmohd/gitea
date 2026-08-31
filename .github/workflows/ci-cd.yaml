@@ -1,4 +1,4 @@
-name: 🚀 Gitea App DevSecOps CI/CD Pipeline
+name: 🚀 Gitea App CI/CD Pipeline (AWS OIDC & ECR)
 
 on:
   push:
@@ -15,65 +15,59 @@ on:
         required: false
         default: ''
 
+# Mandatory permissions for requesting AWS OIDC STS JWT tokens
 permissions:
-  id-token: write   # Required for requesting AWS OIDC STS JWT Token
-  contents: read    # Required for actions/checkout
+  id-token: write
+  contents: read
 
 env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: gitea-custom
+  AWS_ROLE_ARN: arn:aws:iam::542697646590:role/gitea-prod-github-actions-ecr-role
   GITOPS_REPO: ariphmohd/gitea-platform
-  ROLE_TO_ASSUME: arn:aws:iam::542697646590:role/gitea-prod-github-actions-ecr-role
 
 jobs:
-  # ============================================================================
-  # 1. Security Vulnerability Scan Job (Trivy CVE Scanner)
-  # ============================================================================
-  security-scan:
-    name: 🛡️ Trivy Vulnerability & Security Scan
+  build-and-push:
+    name: 🛡️ Build, Scan & Push to Amazon ECR
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: read
+
     steps:
+      # Step 1: Checkout Application Source Code
       - name: 📥 Checkout Application Source Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: 🔍 Run Trivy Security Vulnerability Scanner
+      # Step 2: Trivy Vulnerability & Security Scanner
+      - name: 🛡️ Run Trivy Security Vulnerability Scanner
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           ignore-unfixed: true
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '0' # Non-blocking on advisory CVEs
+          exit-code: '0'
 
-  # ============================================================================
-  # 2. Build, Sign & Push Container Image to Amazon ECR (Passwordless OIDC)
-  # ============================================================================
-  build-and-push:
-    name: 📦 Build & Push to Amazon ECR (AWS OIDC)
-    needs: [security-scan]
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write   # Explicit job-level OIDC permission
-      contents: read
-    steps:
-      - name: 📥 Checkout Application Source Code
-        uses: actions/checkout@v4
-
-      - name: 🛠️ Set up Docker Buildx
+      # Step 3: Setup Docker Buildx Engine
+      - name: 🐳 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: 🔐 Authenticate with AWS via OpenID Connect (Zero Static Keys)
+      # Step 4: Authenticate to AWS via Passwordless OpenID Connect (OIDC)
+      - name: 🔐 Authenticate to AWS via OIDC (Zero Static Keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::542697646590:role/gitea-prod-github-actions-ecr-role
-          aws-region: ap-south-1
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: 🔑 Log in to Amazon ECR Private Registry
+      # Step 5: Log in to Amazon ECR Private Registry
+      - name: 📦 Log in to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Step 6: Compute Image Tag & URLs
       - name: 🏷️ Compute Image Tag
         id: meta
         run: |
@@ -87,7 +81,8 @@ jobs:
           echo "REGISTRY=${{ steps.login-ecr.outputs.registry }}" >> "$GITHUB_OUTPUT"
           echo "FULL_IMAGE=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: 🏗️ Build and Push Rootless Container Image to Amazon ECR
+      # Step 7: Build & Push Rootless Container Image to Amazon ECR
+      - name: 🚀 Build & Push Rootless Container Image to Amazon ECR
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -99,61 +94,32 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ============================================================================
-  # 3. Automated GitOps Tag Promotion to ArgoCD Platform Repository
-  # ============================================================================
-  update-gitops:
-    name: 🐙 Update GitOps Manifests (ArgoCD Auto-Sync)
-    needs: [build-and-push]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: 🏷️ Determine Image Tag
-        id: tag
-        run: |
-          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
-            TAG="${{ github.event.inputs.image_tag }}"
-          else
-            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-            TAG="sha-${SHORT_SHA}"
-          fi
-          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: 📥 Clone GitOps Repository (gitea-platform)
-        if: ${{ env.GITOPS_PAT != '' || secrets.GITOPS_PAT != '' }}
+      # Step 8: Automated GitOps Promotion to Platform Repository (ArgoCD Auto-Sync)
+      - name: 🐙 Promote Image Tag to GitOps Platform Repository
+        if: ${{ secrets.GITOPS_PAT != '' }}
         env:
           GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
+          NEW_TAG: ${{ steps.meta.outputs.IMAGE_TAG }}
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git clone https://x-access-token:${GITOPS_PAT}@github.com/${{ env.GITOPS_REPO }}.git gitops-repo
-
-      - name: ✏️ Update Image Tag in Helm & ArgoCD Values
-        if: ${{ env.GITOPS_PAT != '' || secrets.GITOPS_PAT != '' }}
-        env:
-          NEW_TAG: ${{ steps.tag.outputs.TAG }}
-        run: |
-          cd gitops-repo
           
-          # Update helm/gitea-values.yaml if present
+          git clone "https://x-access-token:${GITOPS_PAT}@github.com/${{ env.GITOPS_REPO }}.git" /tmp/gitops-repo
+          cd /tmp/gitops-repo
+
+          # Update helm/gitea-values.yaml
           if [ -f "helm/gitea-values.yaml" ]; then
-            sed -i "s|repository:.*|repository: 542697646590.dkr.ecr.ap-south-1.amazonaws.com/gitea-custom|g" helm/gitea-values.yaml
+            sed -i "s|repository:.*|repository: ${REGISTRY}/${{ env.ECR_REPOSITORY }}|g" helm/gitea-values.yaml
             sed -i "s|tag: \".*\"|tag: \"${NEW_TAG}\"|g" helm/gitea-values.yaml
           fi
 
-          # Update argocd/values/gitea-values.yaml if present
+          # Update argocd/values/gitea-values.yaml
           if [ -f "argocd/values/gitea-values.yaml" ]; then
-            sed -i "s|repository:.*|repository: 542697646590.dkr.ecr.ap-south-1.amazonaws.com/gitea-custom|g" argocd/values/gitea-values.yaml
+            sed -i "s|repository:.*|repository: ${REGISTRY}/${{ env.ECR_REPOSITORY }}|g" argocd/values/gitea-values.yaml
             sed -i "s|tag: \".*\"|tag: \"${NEW_TAG}\"|g" argocd/values/gitea-values.yaml
           fi
 
-          # Update argocd/gitea-application.yaml if present
-          if [ -f "argocd/gitea-application.yaml" ]; then
-            sed -i "s|targetRevision:.*|targetRevision: '10.5.0'|g" argocd/gitea-application.yaml
-          fi
-
-          # Commit & Push changes to trigger ArgoCD rolling update
           git add -A
           if ! git diff-index --quiet HEAD; then
             git commit -m "chore(gitops): auto-deploy custom gitea image tag ${NEW_TAG} [skip ci]"
@@ -163,9 +129,12 @@ jobs:
             echo "ℹ️ No changes detected in GitOps repository."
           fi
 
-      - name: ℹ️ GitOps Secret Notice
-        if: ${{ env.GITOPS_PAT == '' && secrets.GITOPS_PAT == '' }}
+      - name: ℹ️ GitOps Notice
+        if: ${{ secrets.GITOPS_PAT == '' }}
         run: |
-          echo "⚠️ Note: Secret 'GITOPS_PAT' was not found in this repository."
-          echo "Image ${{ steps.tag.outputs.TAG }} was pushed to Amazon ECR."
-          echo "To enable automated GitOps promotion to ArgoCD, add 'GITOPS_PAT' in GitHub Settings -> Secrets -> Actions."
+          echo "================================================================="
+          echo "✅ IMAGE BUILD & ECR PUSH COMPLETED SUCCESSFULLY!"
+          echo "Pushed Image: ${{ steps.meta.outputs.FULL_IMAGE }}"
+          echo "ℹ️ Note: 'GITOPS_PAT' secret was not found. To enable automatic"
+          echo "ArgoCD image promotion, add 'GITOPS_PAT' in GitHub Secrets."
+          echo "================================================================="

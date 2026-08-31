@@ -94,58 +94,57 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Step 8: Automated GitOps Promotion to Platform Repository (ArgoCD Auto-Sync)
-      - name: 🐙 Promote Image Tag to GitOps Platform Repository
+      # Step 8: Checkout GitOps Platform Repository (Using Native Action)
+      - name: 🐙 Checkout GitOps Platform Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ariphmohd/gitea-platform
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops-repo
+          persist-credentials: true
+
+      # Step 9: Update Manifests & Commit to Platform Repo (ArgoCD Auto-Sync)
+      - name: 🚀 Update GitOps Image Tag & Push
         env:
-          GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
           NEW_TAG: ${{ steps.meta.outputs.IMAGE_TAG }}
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          FULL_IMAGE: ${{ steps.meta.outputs.FULL_IMAGE }}
         run: |
-          # Sanitize token
-          CLEAN_PAT=$(echo -n "${GITOPS_PAT}" | tr -d '\r\n ' | xargs || echo "")
-          
-          if [ -z "${CLEAN_PAT}" ]; then
-            echo "================================================================="
-            echo "✅ IMAGE BUILD & ECR PUSH COMPLETED SUCCESSFULLY!"
-            echo "Pushed Image: ${FULL_IMAGE}"
-            echo "ℹ️ Note: 'GITOPS_PAT' secret was not found."
-            echo "To enable automatic ArgoCD rolling deployments, add 'GITOPS_PAT'"
-            echo "in GitHub Secrets (repo: ariphmohd/gitea)."
-            echo "================================================================="
-            exit 0
-          fi
-
           echo "================================================================="
           echo "🚀 UPDATING GITOPS PLATFORM REPOSITORY FOR ARGOCD AUTO-DEPLOY"
           echo "================================================================="
           echo "New Image Tag: ${NEW_TAG}"
 
-          # Encode authorization header safely to prevent URL malformed errors
-          AUTH_HEADER=$(python3 -c "import base64; print(base64.b64encode('x-access-token:${CLEAN_PAT}'.encode()).decode())")
+          cd gitops-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic ${AUTH_HEADER}"
+          # Update helm/gitea-values.yaml
+          if [ -f "helm/gitea-values.yaml" ]; then
+            python3 -c "
+            import re
+            with open('helm/gitea-values.yaml', 'r') as f:
+                content = f.read()
+            content = re.sub(r'(repository:\s*).*', r'\g<1>${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}', content)
+            content = re.sub(r'(tag:\s*).*', r'\g<1>\"${NEW_TAG}\"', content)
+            with open('helm/gitea-values.yaml', 'w') as f:
+                f.write(content)
+            "
+            echo "✅ Updated helm/gitea-values.yaml"
+          fi
 
-          rm -rf /tmp/gitops-repo
-          git clone "https://github.com/${{ env.GITOPS_REPO }}.git" /tmp/gitops-repo
-          cd /tmp/gitops-repo
-
-          # Update YAML values files with Python
-          python3 -c "
-          import re, os
-
-          for filepath in ['helm/gitea-values.yaml', 'argocd/values/gitea-values.yaml']:
-              if os.path.exists(filepath):
-                  with open(filepath, 'r') as f:
-                      content = f.read()
-                  content = re.sub(r'(repository:\s*).*', r'\g<1>${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}', content)
-                  content = re.sub(r'(tag:\s*).*', r'\g<1>\"${NEW_TAG}\"', content)
-                  with open(filepath, 'w') as f:
-                      f.write(content)
-                  print(f'Updated {filepath}')
-          "
+          # Update argocd/values/gitea-values.yaml
+          if [ -f "argocd/values/gitea-values.yaml" ]; then
+            python3 -c "
+            import re
+            with open('argocd/values/gitea-values.yaml', 'r') as f:
+                content = f.read()
+            content = re.sub(r'(repository:\s*).*', r'\g<1>${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}', content)
+            content = re.sub(r'(tag:\s*).*', r'\g<1>\"${NEW_TAG}\"', content)
+            with open('argocd/values/gitea-values.yaml', 'w') as f:
+                f.write(content)
+            "
+            echo "✅ Updated argocd/values/gitea-values.yaml"
+          fi
 
           git add -A
           if ! git diff-index --quiet HEAD; then

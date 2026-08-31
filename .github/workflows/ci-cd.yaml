@@ -9,14 +9,10 @@ permissions:
 
 jobs:
   test-oidc:
-    name: Test GitHub OIDC → AWS
+    name: Test AWS OIDC Connection
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🔎 Debug GitHub OIDC Claims
-        uses: github/actions-oidc-debugger@main
-        continue-on-error: true
-
       - name: 🔐 Configure AWS Credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:

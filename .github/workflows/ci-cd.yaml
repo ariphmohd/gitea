@@ -102,7 +102,10 @@ jobs:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           FULL_IMAGE: ${{ steps.meta.outputs.FULL_IMAGE }}
         run: |
-          if [ -z "${GITOPS_PAT}" ]; then
+          # Sanitize token
+          CLEAN_PAT=$(echo -n "${GITOPS_PAT}" | tr -d '\r\n ' | xargs || echo "")
+          
+          if [ -z "${CLEAN_PAT}" ]; then
             echo "================================================================="
             echo "✅ IMAGE BUILD & ECR PUSH COMPLETED SUCCESSFULLY!"
             echo "Pushed Image: ${FULL_IMAGE}"
@@ -117,30 +120,42 @@ jobs:
           echo "🚀 UPDATING GITOPS PLATFORM REPOSITORY FOR ARGOCD AUTO-DEPLOY"
           echo "================================================================="
           echo "New Image Tag: ${NEW_TAG}"
-          
+
+          # Encode authorization header safely to prevent URL malformed errors
+          AUTH_HEADER=$(python3 -c "import base64; print(base64.b64encode('x-access-token:${CLEAN_PAT}'.encode()).decode())")
+
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git clone "https://x-access-token:${GITOPS_PAT}@github.com/${{ env.GITOPS_REPO }}.git" /tmp/gitops-repo
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic ${AUTH_HEADER}"
+
+          rm -rf /tmp/gitops-repo
+          git clone "https://github.com/${{ env.GITOPS_REPO }}.git" /tmp/gitops-repo
           cd /tmp/gitops-repo
 
-          # Update helm/gitea-values.yaml
-          if [ -f "helm/gitea-values.yaml" ]; then
-            sed -i "s|repository:.*|repository: ${REGISTRY}/${{ env.ECR_REPOSITORY }}|g" helm/gitea-values.yaml
-            sed -i "s|tag: \".*\"|tag: \"${NEW_TAG}\"|g" helm/gitea-values.yaml
-          fi
+          # Update YAML values files with Python
+          python3 -c "
+          import re, os
 
-          # Update argocd/values/gitea-values.yaml
-          if [ -f "argocd/values/gitea-values.yaml" ]; then
-            sed -i "s|repository:.*|repository: ${REGISTRY}/${{ env.ECR_REPOSITORY }}|g" argocd/values/gitea-values.yaml
-            sed -i "s|tag: \".*\"|tag: \"${NEW_TAG}\"|g" argocd/values/gitea-values.yaml
-          fi
+          for filepath in ['helm/gitea-values.yaml', 'argocd/values/gitea-values.yaml']:
+              if os.path.exists(filepath):
+                  with open(filepath, 'r') as f:
+                      content = f.read()
+                  content = re.sub(r'(repository:\s*).*', r'\g<1>${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}', content)
+                  content = re.sub(r'(tag:\s*).*', r'\g<1>\"${NEW_TAG}\"', content)
+                  with open(filepath, 'w') as f:
+                      f.write(content)
+                  print(f'Updated {filepath}')
+          "
 
           git add -A
           if ! git diff-index --quiet HEAD; then
             git commit -m "chore(gitops): auto-deploy custom gitea image tag ${NEW_TAG} [skip ci]"
             git push origin main || git push origin master
-            echo "✅ Successfully updated GitOps repository with image tag: ${NEW_TAG}"
+            echo "================================================================="
+            echo "🎉 GITOPS HANDSHAKE COMPLETE!"
+            echo "Successfully pushed new image tag (${NEW_TAG}) to ${{ env.GITOPS_REPO }}!"
+            echo "ArgoCD on EKS will now trigger a zero-downtime rolling update."
+            echo "================================================================="
           else
-            echo "ℹ️ No changes detected in GitOps repository."
+            echo "ℹ️ Manifests already up to date with tag ${NEW_TAG}."
           fi

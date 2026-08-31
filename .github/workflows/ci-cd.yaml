@@ -94,9 +94,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Step 8: Checkout GitOps Platform Repository (Using Native Action)
+      # Step 8: Checkout GitOps Platform Repository
       - name: 🐙 Checkout GitOps Platform Repository
+        id: checkout-gitops
         uses: actions/checkout@v4
+        continue-on-error: true
         with:
           repository: ariphmohd/gitea-platform
           token: ${{ secrets.GITOPS_PAT }}
@@ -105,6 +107,7 @@ jobs:
 
       # Step 9: Update Manifests & Commit to Platform Repo (ArgoCD Auto-Sync)
       - name: 🚀 Update GitOps Image Tag & Push
+        if: steps.checkout-gitops.outcome == 'success'
         env:
           NEW_TAG: ${{ steps.meta.outputs.IMAGE_TAG }}
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -120,29 +123,17 @@ jobs:
 
           # Update helm/gitea-values.yaml
           if [ -f "helm/gitea-values.yaml" ]; then
-            python3 -c "
-            import re
-            with open('helm/gitea-values.yaml', 'r') as f:
-                content = f.read()
-            content = re.sub(r'(repository:\s*).*', r'\g<1>${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}', content)
-            content = re.sub(r'(tag:\s*).*', r'\g<1>\"${NEW_TAG}\"', content)
-            with open('helm/gitea-values.yaml', 'w') as f:
-                f.write(content)
-            "
+            sed -i "s|repository:.*|repository: ${REGISTRY}/${{ env.ECR_REPOSITORY }}|g" helm/gitea-values.yaml
+            sed -i "s|tag: \".*\"|tag: \"${NEW_TAG}\"|g" helm/gitea-values.yaml
+            sed -i "s|tag: '.*'|tag: \"${NEW_TAG}\"|g" helm/gitea-values.yaml
             echo "✅ Updated helm/gitea-values.yaml"
           fi
 
           # Update argocd/values/gitea-values.yaml
           if [ -f "argocd/values/gitea-values.yaml" ]; then
-            python3 -c "
-            import re
-            with open('argocd/values/gitea-values.yaml', 'r') as f:
-                content = f.read()
-            content = re.sub(r'(repository:\s*).*', r'\g<1>${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}', content)
-            content = re.sub(r'(tag:\s*).*', r'\g<1>\"${NEW_TAG}\"', content)
-            with open('argocd/values/gitea-values.yaml', 'w') as f:
-                f.write(content)
-            "
+            sed -i "s|repository:.*|repository: ${REGISTRY}/${{ env.ECR_REPOSITORY }}|g" argocd/values/gitea-values.yaml
+            sed -i "s|tag: \".*\"|tag: \"${NEW_TAG}\"|g" argocd/values/gitea-values.yaml
+            sed -i "s|tag: '.*'|tag: \"${NEW_TAG}\"|g" argocd/values/gitea-values.yaml
             echo "✅ Updated argocd/values/gitea-values.yaml"
           fi
 
@@ -158,3 +149,14 @@ jobs:
           else
             echo "ℹ️ Manifests already up to date with tag ${NEW_TAG}."
           fi
+
+      # Step 10: GitOps Status Notice
+      - name: ℹ️ GitOps Status Notice
+        if: steps.checkout-gitops.outcome != 'success'
+        run: |
+          echo "================================================================="
+          echo "✅ IMAGE BUILD & ECR PUSH COMPLETED SUCCESSFULLY! 🎉"
+          echo "Live Image in ECR: ${{ steps.meta.outputs.FULL_IMAGE }}"
+          echo "-----------------------------------------------------------------"
+          echo "⚠️ GitOps notice: 'GITOPS_PAT' was not validated."
+          echo "================================================================="

@@ -96,12 +96,28 @@ jobs:
 
       # Step 8: Automated GitOps Promotion to Platform Repository (ArgoCD Auto-Sync)
       - name: 🐙 Promote Image Tag to GitOps Platform Repository
-        if: ${{ secrets.GITOPS_PAT != '' }}
         env:
           GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
           NEW_TAG: ${{ steps.meta.outputs.IMAGE_TAG }}
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          FULL_IMAGE: ${{ steps.meta.outputs.FULL_IMAGE }}
         run: |
+          if [ -z "${GITOPS_PAT}" ]; then
+            echo "================================================================="
+            echo "✅ IMAGE BUILD & ECR PUSH COMPLETED SUCCESSFULLY!"
+            echo "Pushed Image: ${FULL_IMAGE}"
+            echo "ℹ️ Note: 'GITOPS_PAT' secret was not found."
+            echo "To enable automatic ArgoCD rolling deployments, add 'GITOPS_PAT'"
+            echo "in GitHub Secrets (repo: ariphmohd/gitea)."
+            echo "================================================================="
+            exit 0
+          fi
+
+          echo "================================================================="
+          echo "🚀 UPDATING GITOPS PLATFORM REPOSITORY FOR ARGOCD AUTO-DEPLOY"
+          echo "================================================================="
+          echo "New Image Tag: ${NEW_TAG}"
+          
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
@@ -128,13 +144,3 @@ jobs:
           else
             echo "ℹ️ No changes detected in GitOps repository."
           fi
-
-      - name: ℹ️ GitOps Notice
-        if: ${{ secrets.GITOPS_PAT == '' }}
-        run: |
-          echo "================================================================="
-          echo "✅ IMAGE BUILD & ECR PUSH COMPLETED SUCCESSFULLY!"
-          echo "Pushed Image: ${{ steps.meta.outputs.FULL_IMAGE }}"
-          echo "ℹ️ Note: 'GITOPS_PAT' secret was not found. To enable automatic"
-          echo "ArgoCD image promotion, add 'GITOPS_PAT' in GitHub Secrets."
-          echo "================================================================="

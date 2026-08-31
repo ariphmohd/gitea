@@ -12,6 +12,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------
+      # Step 1: Get and inspect GitHub OIDC token
+      # ------------------------------------------------------------
       - name: 🔎 Get OIDC Token
         shell: bash
         run: |
@@ -22,13 +25,20 @@ jobs:
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
             | jq -r '.value')
 
-          echo "OIDC token received successfully"
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "❌ Failed to obtain OIDC token"
+            exit 1
+          fi
+
+          echo "✅ OIDC token received successfully"
 
           PAYLOAD=$(echo "$TOKEN" | cut -d '.' -f2)
 
+          # Fix base64 padding
           PAYLOAD="${PAYLOAD}$(printf '%*s' \
             $(( (4 - ${#PAYLOAD} % 4) % 4 )) '' | tr ' ' '=')"
 
+          echo "🔎 OIDC Claims:"
           echo "$PAYLOAD" | base64 -d 2>/dev/null | jq '{
             iss,
             aud,
@@ -41,12 +51,19 @@ jobs:
             event_name
           }'
 
+      # ------------------------------------------------------------
+      # Step 2: Assume the NEW AWS IAM role
+      # ------------------------------------------------------------
       - name: 🔐 Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_IAM_ROLE }}
+          role-to-assume: arn:aws:iam::542697646590:role/ariph-new-github-role
           aws-region: ap-south-1
           audience: sts.amazonaws.com
 
-      - name: ✅ Verify AWS
-        run: aws sts get-caller-identity
+      # ------------------------------------------------------------
+      # Step 3: Verify AWS identity
+      # ------------------------------------------------------------
+      - name: ✅ Verify AWS Identity
+        run: |
+          aws sts get-caller-identity

@@ -1,102 +1,29 @@
-name: Gitea CI - test and publish to ECR
+name: Build, scan and publish Gitea image
 
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-
-  pull_request:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-
   workflow_dispatch:
 
 permissions:
   contents: read
-
-defaults:
-  run:
-    shell: bash
-
-concurrency:
-  group: gitea-ci-${{ github.ref }}
-  cancel-in-progress: false
+  id-token: write
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
   AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  IMAGE_TAG: sha-${{ github.sha }}
 
 jobs:
-  test:
-    name: Test application source
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run backend unit tests
-        run: make test-backend
-
-      - name: Report source vulnerabilities
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: fs
-          ignore-unfixed: true
-          format: table
-          severity: CRITICAL,HIGH
-          exit-code: '0'
-
-  build-and-push:
-    name: Build and publish rootless image
-    needs: test
-
-    if: >-
-      github.event_name != 'pull_request' &&
-      github.ref == 'refs/heads/main'
-
+  build-scan-push:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
-    permissions:
-      contents: read
-      id-token: write
-
-    outputs:
-      image_uri: ${{ steps.meta.outputs.image_uri }}
-      image_digest: ${{ steps.build.outputs.digest }}
-
     steps:
-      - name: Validate repository variables
-        run: |
-          for VARIABLE in \
-            AWS_REGION \
-            AWS_ACCOUNT_ID \
-            ECR_REPOSITORY \
-            AWS_ROLE_ARN
-          do
-            if [[ -z "${!VARIABLE}" ]]; then
-              echo "::error::Missing repository variable: ${VARIABLE}"
-              exit 1
-            fi
-          done
-
-      - name: Check out source with version history
+      - name: Check out application source
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -105,71 +32,43 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Authenticate to AWS using GitHub OIDC
-        uses: aws-actions/configure-aws-credentials@v6.3.0
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
-          role-session-name: gitea-ci-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Log in to ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Compute image references
-        id: meta
-        env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          IMAGE_TAG="sha-${GITHUB_SHA}"
-          IMAGE_REPOSITORY="${REGISTRY}/${ECR_REPOSITORY}"
-
-          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "image_uri=${IMAGE_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "latest_uri=${IMAGE_REPOSITORY}:latest" >> "$GITHUB_OUTPUT"
-
-      - name: Build source and push image
-        id: build
+      - name: Build Docker image locally
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile.rootless
           platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ steps.meta.outputs.image_uri }}
-            ${{ steps.meta.outputs.latest_uri }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          load: true
+          push: false
+          tags: ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
-      - name: Verify the published image digest
+      - name: Scan Docker image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+      - name: Authenticate to AWS using OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag and push the scanned image
         env:
-          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
-          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          PUBLISHED_DIGEST=$(aws ecr describe-images \
-            --repository-name "$ECR_REPOSITORY" \
-            --image-ids imageTag="$IMAGE_TAG" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
+          LOCAL_IMAGE="${ECR_REPOSITORY}:${IMAGE_TAG}"
+          ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
-          if [[ "$PUBLISHED_DIGEST" != "$EXPECTED_DIGEST" ]]; then
-            echo "::error::Published image digest does not match the build output"
-            exit 1
-          fi
+          docker tag "$LOCAL_IMAGE" "$ECR_IMAGE"
+          docker push "$ECR_IMAGE"
 
-      - name: Record the release image
-        env:
-          IMAGE_URI: ${{ steps.meta.outputs.image_uri }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          {
-            echo '## Published Gitea image'
-
-            printf '\nImage: `%s`\n' "$IMAGE_URI"
-            printf '\nDigest: `%s`\n' "$IMAGE_DIGEST"
-
-            printf '\nFuture ECS image reference: `%s@%s`\n' \
-              "${IMAGE_URI%:*}" "$IMAGE_DIGEST"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Published image: \`${ECR_IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"

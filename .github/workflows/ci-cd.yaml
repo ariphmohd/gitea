@@ -1,162 +1,175 @@
-name: 🚀 Gitea App CI/CD Pipeline (AWS OIDC & ECR)
+name: Gitea CI - test and publish to ECR
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main]
     paths-ignore:
       - '**.md'
       - 'docs/**'
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: 'Custom Image Tag (leave blank for commit SHA)'
-        required: false
-        default: ''
 
-# Mandatory permissions for requesting AWS OIDC STS JWT tokens
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+  workflow_dispatch:
+
 permissions:
-  id-token: write
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: gitea-ci-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  AWS_REGION: ap-south-1
-  ECR_REPOSITORY: gitea-custom
-  AWS_ROLE_ARN: arn:aws:iam::542697646590:role/gitea-prod-github-actions-ecr-role
-  GITOPS_REPO: ariphmohd/gitea-platform
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
 
 jobs:
-  build-and-push:
-    name: 🛡️ Build, Scan & Push to Amazon ECR
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
+  test:
+    name: Test application source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
 
     steps:
-      # Step 1: Checkout Application Source Code
-      - name: 📥 Checkout Application Source Code
-        uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
-      # Step 2: Trivy Vulnerability & Security Scanner
-      - name: 🛡️ Run Trivy Security Vulnerability Scanner
-        uses: aquasecurity/trivy-action@master
+      - name: Set up Go
+        uses: actions/setup-go@v7
         with:
-          scan-type: 'fs'
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run backend unit tests
+        run: make test-backend
+
+      - name: Report source vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
           ignore-unfixed: true
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
+          format: table
+          severity: CRITICAL,HIGH
           exit-code: '0'
 
-      # Step 3: Setup Docker Buildx Engine
-      - name: 🐳 Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+  build-and-push:
+    name: Build and publish rootless image
+    needs: test
 
-      # Step 4: Authenticate to AWS via Passwordless OpenID Connect (OIDC)
-      - name: 🔐 Authenticate to AWS via OIDC (Zero Static Keys)
-        uses: aws-actions/configure-aws-credentials@v4
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    permissions:
+      contents: read
+      id-token: write
+
+    outputs:
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+      image_digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Validate repository variables
+        run: |
+          for VARIABLE in \
+            AWS_REGION \
+            AWS_ACCOUNT_ID \
+            ECR_REPOSITORY \
+            AWS_ROLE_ARN
+          do
+            if [[ -z "${!VARIABLE}" ]]; then
+              echo "::error::Missing repository variable: ${VARIABLE}"
+              exit 1
+            fi
+          done
+
+      - name: Check out source with version history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Authenticate to AWS using GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          role-session-name: gitea-ci-${{ github.run_id }}-${{ github.run_attempt }}
 
-      # Step 5: Log in to Amazon ECR Private Registry
-      - name: 📦 Log in to Amazon ECR
+      - name: Log in to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Step 6: Compute Image Tag & URLs
-      - name: 🏷️ Compute Image Tag
+      - name: Compute image references
         id: meta
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
-            TAG="${{ github.event.inputs.image_tag }}"
-          else
-            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-            TAG="sha-${SHORT_SHA}"
-          fi
-          echo "IMAGE_TAG=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "REGISTRY=${{ steps.login-ecr.outputs.registry }}" >> "$GITHUB_OUTPUT"
-          echo "FULL_IMAGE=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${TAG}" >> "$GITHUB_OUTPUT"
+          IMAGE_TAG="sha-${GITHUB_SHA}"
+          IMAGE_REPOSITORY="${REGISTRY}/${ECR_REPOSITORY}"
 
-      # Step 7: Build & Push Rootless Container Image to Amazon ECR
-      - name: 🚀 Build & Push Rootless Container Image to Amazon ECR
-        uses: docker/build-push-action@v5
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${IMAGE_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "latest_uri=${IMAGE_REPOSITORY}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build source and push image
+        id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile.rootless
+          platforms: linux/amd64
           push: true
           tags: |
-            ${{ steps.meta.outputs.FULL_IMAGE }}
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+            ${{ steps.meta.outputs.image_uri }}
+            ${{ steps.meta.outputs.latest_uri }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Step 8: Checkout GitOps Platform Repository
-      - name: 🐙 Checkout GitOps Platform Repository
-        id: checkout-gitops
-        uses: actions/checkout@v4
-        continue-on-error: true
-        with:
-          repository: ariphmohd/gitea-platform
-          token: ${{ secrets.GITOPS_PAT }}
-          path: gitops-repo
-          persist-credentials: true
-
-      # Step 9: Update Manifests & Commit to Platform Repo (ArgoCD Auto-Sync)
-      - name: 🚀 Update GitOps Image Tag & Push
-        if: steps.checkout-gitops.outcome == 'success'
+      - name: Verify the published image digest
         env:
-          NEW_TAG: ${{ steps.meta.outputs.IMAGE_TAG }}
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          echo "================================================================="
-          echo "🚀 UPDATING GITOPS PLATFORM REPOSITORY FOR ARGOCD AUTO-DEPLOY"
-          echo "================================================================="
-          echo "New Image Tag: ${NEW_TAG}"
+          PUBLISHED_DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
 
-          cd gitops-repo
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Update helm/gitea-values.yaml
-          if [ -f "helm/gitea-values.yaml" ]; then
-            sed -i "s|repository:.*|repository: ${REGISTRY}/${{ env.ECR_REPOSITORY }}|g" helm/gitea-values.yaml
-            sed -i "s|tag: \".*\"|tag: \"${NEW_TAG}\"|g" helm/gitea-values.yaml
-            sed -i "s|tag: '.*'|tag: \"${NEW_TAG}\"|g" helm/gitea-values.yaml
-            echo "✅ Updated helm/gitea-values.yaml"
+          if [[ "$PUBLISHED_DIGEST" != "$EXPECTED_DIGEST" ]]; then
+            echo "::error::Published image digest does not match the build output"
+            exit 1
           fi
 
-          # Update argocd/values/gitea-values.yaml
-          if [ -f "argocd/values/gitea-values.yaml" ]; then
-            sed -i "s|repository:.*|repository: ${REGISTRY}/${{ env.ECR_REPOSITORY }}|g" argocd/values/gitea-values.yaml
-            sed -i "s|tag: \".*\"|tag: \"${NEW_TAG}\"|g" argocd/values/gitea-values.yaml
-            sed -i "s|tag: '.*'|tag: \"${NEW_TAG}\"|g" argocd/values/gitea-values.yaml
-            echo "✅ Updated argocd/values/gitea-values.yaml"
-          fi
-
-          git add -A
-          if ! git diff-index --quiet HEAD; then
-            git commit -m "chore(gitops): auto-deploy custom gitea image tag ${NEW_TAG} [skip ci]"
-            git push origin main || git push origin master
-            echo "================================================================="
-            echo "🎉 GITOPS HANDSHAKE COMPLETE!"
-            echo "Successfully pushed new image tag (${NEW_TAG}) to ${{ env.GITOPS_REPO }}!"
-            echo "ArgoCD on EKS will now trigger a zero-downtime rolling update."
-            echo "================================================================="
-          else
-            echo "ℹ️ Manifests already up to date with tag ${NEW_TAG}."
-          fi
-
-      # Step 10: GitOps Status Notice
-      - name: ℹ️ GitOps Status Notice
-        if: steps.checkout-gitops.outcome != 'success'
+      - name: Record the release image
+        env:
+          IMAGE_URI: ${{ steps.meta.outputs.image_uri }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          echo "================================================================="
-          echo "✅ IMAGE BUILD & ECR PUSH COMPLETED SUCCESSFULLY! 🎉"
-          echo "Live Image in ECR: ${{ steps.meta.outputs.FULL_IMAGE }}"
-          echo "-----------------------------------------------------------------"
-          echo "⚠️ GitOps notice: 'GITOPS_PAT' was not validated."
-          echo "================================================================="
+          {
+            echo '## Published Gitea image'
+
+            printf '\nImage: `%s`\n' "$IMAGE_URI"
+            printf '\nDigest: `%s`\n' "$IMAGE_DIGEST"
+
+            printf '\nFuture ECS image reference: `%s@%s`\n' \
+              "${IMAGE_URI%:*}" "$IMAGE_DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"
